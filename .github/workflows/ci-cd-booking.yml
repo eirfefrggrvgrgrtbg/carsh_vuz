@@ -70,6 +70,6 @@ jobs:
           container-name: ${{ secrets.YC_CONTAINER_NAME }}
           folder-id: ${{ secrets.YC_FOLDER_ID }}
           revision-image-url: cr.yandex/${{ secrets.YC_REGISTRY_ID }}/carsharing-booking-service:latest
-          service-account-id: ${{ secrets.YC_SERVICE_ACCOUNT_ID }}
+          revision-service-account-id: ${{ secrets.YC_SERVICE_ACCOUNT_ID }}
           revision-env: |
             APP_PORT=8002
