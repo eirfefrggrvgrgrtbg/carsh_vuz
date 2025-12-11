@@ -1,0 +1,70 @@
+name: CI/CD for Trip Service (Yandex Cloud)
+
+on:
+  push:
+    paths:
+      - "trip_service/**"
+      - ".github/workflows/ci-cd-trip-yc.yml"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+        working-directory: ./trip_service
+
+      - name: Run tests
+        run: pytest
+        working-directory: ./trip_service
+
+  build-and-push:
+    needs: test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Configure Docker to use YC registry
+        run: |
+          echo ${{ secrets.YC_SA_KEY }} > key.json
+          yc config set service-account-key key.json
+          yc config set folder-id ${{ secrets.YC_FOLDER_ID }}
+          yc compute instance list || true
+
+      - name: Login to Yandex Container Registry
+        run: |
+          yc container registry configure-docker
+
+      - name: Build and push image
+        run: |
+          docker build -t cr.yandex/${{ secrets.YC_REGISTRY_ID }}/carsharing-trip-service:latest ./trip_service
+          docker push cr.yandex/${{ secrets.YC_REGISTRY_ID }}/carsharing-trip-service:latest
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy revision
+        uses: yc-actions/yc-sls-container-deploy@v2
+        with:
+          yc-sa-json-credentials: ${{ secrets.YC_SA_KEY }}
+          folder-id: ${{ secrets.YC_FOLDER_ID }}
+          container-name: ${{ secrets.YC_TRIP_CONTAINER_NAME }}
+          revision-image-url: cr.yandex/${{ secrets.YC_REGISTRY_ID }}/carsharing-trip-service:latest
+          revision-service-account-id: ${{ secrets.YC_SERVICE_ACCOUNT_ID }}
+          revision-env: |
+            APP_PORT=8003
