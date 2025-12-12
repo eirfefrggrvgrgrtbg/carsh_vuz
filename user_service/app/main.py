@@ -1,10 +1,90 @@
 # app/main.py
+import os
+import time
+import uuid
+import socket
+import logging
+from fastapi import FastAPI, Request
+from starlette.responses import Response
+from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTENT_TYPE_LATEST
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, EmailStr
 from typing import Optional, Dict
 from uuid import uuid4
+SERVICE_NAME = os.getenv("SERVICE_NAME", "unknown-service")
+INSTANCE_ID = os.getenv("INSTANCE_ID", socket.gethostname())
+
+# --- Logging ---
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s service=%(service)s instance=%(instance)s request_id=%(request_id)s %(message)s",
+)
+logger = logging.getLogger("app")
+
+class ContextFilter(logging.Filter):
+    def __init__(self):
+        super().__init__()
+        self.request_id = "-"
+
+    def set_request_id(self, rid: str):
+        self.request_id = rid
+
+    def filter(self, record):
+        record.service = SERVICE_NAME
+        record.instance = INSTANCE_ID
+        record.request_id = getattr(self, "request_id", "-")
+        return True
+
+ctx_filter = ContextFilter()
+logger.addFilter(ctx_filter)
+
+# --- Prometheus metrics ---
+HTTP_REQUESTS_TOTAL = Counter(
+    "http_requests_total",
+    "Total HTTP requests",
+    ["service", "method", "path", "status"],
+)
+HTTP_REQUEST_DURATION = Histogram(
+    "http_request_duration_seconds",
+    "HTTP request duration in seconds",
+    ["service", "method", "path"],
+)
+HTTP_INPROGRESS = Gauge(
+    "http_inprogress_requests",
+    "In-progress HTTP requests",
+    ["service"],
+)
 
 app = FastAPI(title="User Service")
+
+@app.middleware("http")
+async def observability_middleware(request: Request, call_next):
+    rid = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+    ctx_filter.set_request_id(rid)
+
+    start = time.time()
+    method = request.method
+    path = request.url.path
+
+    HTTP_INPROGRESS.labels(service=SERVICE_NAME).inc()
+    status_code = 500
+
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+        return response
+    finally:
+        duration = time.time() - start
+        HTTP_INPROGRESS.labels(service=SERVICE_NAME).dec()
+
+        HTTP_REQUESTS_TOTAL.labels(
+            service=SERVICE_NAME, method=method, path=path, status=str(status_code)
+        ).inc()
+        HTTP_REQUEST_DURATION.labels(
+            service=SERVICE_NAME, method=method, path=path
+        ).observe(duration)
+
+        logger.info(f"{method} {path} -> {status_code} duration={duration:.4f}s")
 
 # ====== Pydantic-схемы ======
 
@@ -39,6 +119,9 @@ users_by_login: Dict[str, str] = {}  # phone/email -> user_id
 
 
 # ====== Эндпоинты ======
+@app.get("/metrics")
+def metrics():
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 @app.post("/api/users/register", response_model=UserResponse)
 def register_user(payload: UserRegisterRequest):
